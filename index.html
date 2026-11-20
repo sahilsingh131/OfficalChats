@@ -3,10 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-</head>
-<body>
 <title>Squad Chat</title>
-<meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700&display=swap">
 <style>
@@ -232,7 +229,21 @@ svg { display: block; }
 }
 @media (max-width: 760px) and (prefers-reduced-motion: reduce) { .side { transition: none; } }
 </style>
-
+<style>
+.modal-bg { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / .6); display: grid; place-items: center;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); backdrop-filter: blur(4px); }
+.modal { width: min(400px, 100%); background: var(--bg); color: var(--fg); border-radius: 16px; padding: 28px; display: flex; flex-direction: column; gap: 14px;
+  box-shadow: 0 24px 60px rgb(0 0 0 / .35); border-top: 3px solid var(--gold); }
+.modal .mark { width: 44px; height: 44px; }
+.modal h3 { margin: 4px 0 0; font-family: var(--font-brand); font-size: 22px; letter-spacing: -0.02em; }
+.modal p { margin: 0; color: var(--muted); line-height: 1.5; }
+.modal input { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg-2); color: var(--fg); font: inherit; }
+.modal input:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gold) 20%, transparent); }
+.modal .send { margin-left: 0; height: 44px; justify-content: center; }
+.modal code { background: var(--bg-2); border: 1px solid var(--line); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+</style>
+</head>
+<body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="i-hash" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M5 9h14M4 15h14M10 3 8 21M16 3l-2 18"/></symbol>
   <symbol id="i-send" viewBox="0 0 24 24"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z"/></symbol>
@@ -311,7 +322,31 @@ svg { display: block; }
   </main>
 </div>
 
+<div class="modal-bg" id="welcome" hidden>
+  <form class="modal" id="welcome-form">
+    <div class="mark"><svg width="22" height="22"><use href="#i-crown"/></svg></div>
+    <h3 id="welcome-title">Welcome to Squad Chat</h3>
+    <p>Pick the name your friends will see. You can change it later from the bottom of the sidebar.</p>
+    <input id="welcome-nick" maxlength="24" placeholder="Your name" autocomplete="off" aria-label="Your name" required>
+    <button class="send" type="submit">Join the chat</button>
+  </form>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
+// ============ PASTE YOUR FIREBASE CONFIG HERE ============
+const firebaseConfig = {
+  apiKey: "",
+  authDomain: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "",
+  appId: ""
+};
+// =========================================================
+
 (() => {
   const CHANNELS = [
     { id: "general", topic: "Whatever's on your mind" },
@@ -322,6 +357,7 @@ svg { display: block; }
   const EMOJI = ["😂", "💀", "🔥", "😭", "👀", "🙏", "💯", "🫡", "😎", "🤝", "❤️", "👍", "🎮", "🍕", "😤", "🥶"];
   const REACTS = ["🔥", "😂", "💀", "👍", "❤️"];
   const PALETTE = ["#1f1f1f", "#a8841f", "#3d3d3a", "#7a5c12", "#2b2b28", "#b8952e", "#4a4a45", "#6b5310"];
+  const ONLINE_MS = 75000, BEAT_MS = 25000;
 
   const $ = (id) => document.getElementById(id);
   const store = {
@@ -329,25 +365,25 @@ svg { display: block; }
     set(k, v) { try { localStorage.setItem(k, v); } catch {} },
   };
 
-  let db = null, user = null, room = null, me = null, uid = null;
+  let fs = null, uid = null;
   let current = store.get("sq.chan", "general");
   if (!CHANNELS.find(c => c.id === current)) current = "general";
   let unsubFeed = null, loadTimer = null;
-  let msgs = [], pending = new Map(), latest = {}, peers = [], profiles = {};
-  let canWrite = true, firstFeed = true;
+  let msgs = [], pending = new Map(), latest = {}, presence = [];
+  let firstFeed = true, settings = null;
   let nick = store.get("sq.nick", "");
+  let myTyping = null;
 
   const colorFor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
   const initials = (n) => (n || "?").trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase();
-  const nameOf = (id, n) => n || (profiles[id] && profiles[id].name) || "Someone";
+  const nickOf = (id) => { const p = presence.find(x => x.id === id); return p && p.nick; };
+  const nameOf = (id, n) => n || nickOf(id) || "Someone";
 
   function avatarEl(id, name, small) {
     const d = document.createElement("div");
     d.className = "avatar" + (small ? " sm" : "");
     d.style.background = colorFor(id || name);
-    const p = profiles[id];
-    if (p && p.avatarUrl && !p.avatarUrl.startsWith("data:")) { const img = document.createElement("img"); img.src = p.avatarUrl; img.alt = ""; d.append(img); }
-    else d.textContent = initials(name);
+    d.textContent = initials(name);
     return d;
   }
   const icon = (id, s = 16) => { const ns = "http://www.w3.org/2000/svg"; const svg = document.createElementNS(ns, "svg"); svg.setAttribute("width", s); svg.setAttribute("height", s); const u = document.createElementNS(ns, "use"); u.setAttribute("href", "#" + id); svg.append(u); return svg; };
@@ -382,22 +418,22 @@ svg { display: block; }
     current = id; store.set("sq.chan", id);
     pending.clear(); msgs = [];
     setHeader(); renderChannels();
-    if (room) room.presence({ chan: id, typing: null });
+    myTyping = null; beat();
     subscribeFeed(); renderPeers();
   }
 
   // ---------- feed ----------
+  const msgCol = (ch) => fs.collection("channels").doc(ch).collection("messages");
   function subscribeFeed() {
     if (unsubFeed) unsubFeed();
-    if (!db) return;
     firstFeed = true;
     $("feed").innerHTML = '<div class="loading"><span class="spinner"></span>Loading messages</div>';
     clearTimeout(loadTimer);
     loadTimer = setTimeout(() => showBanner("Can't reach the chat right now. It will catch up on its own when the connection is back."), 10000);
     const chan = current;
-    unsubFeed = db.collection("channels/" + chan + "/messages").orderBy("ts", "desc").limit(150).onSnapshot((snap) => {
+    unsubFeed = msgCol(chan).orderBy("ts", "desc").limit(150).onSnapshot({ includeMetadataChanges: false }, (snap) => {
       if (chan !== current) return;
-      if (!snap.metadata.fromCache) { clearTimeout(loadTimer); if (canWrite) hideBanner(); }
+      clearTimeout(loadTimer); hideBanner();
       const before = new Set(msgs.map(m => m.id));
       msgs = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
       for (const m of msgs) pending.delete(m.id);
@@ -405,11 +441,11 @@ svg { display: block; }
       if (msgs.length) { latest[chan] = msgs[msgs.length - 1].ts; store.set("sq.seen." + chan, String(latest[chan])); }
       render(firstFeed ? null : new Set(msgs.filter(m => !before.has(m.id)).map(m => m.id)));
       firstFeed = false;
-    }, (e) => { clearTimeout(loadTimer); showBanner("The chat stopped updating (" + e.code + "). Reopen the page to reconnect."); });
+    }, (e) => { clearTimeout(loadTimer); showBanner("The chat stopped updating (" + e.code + "). Check your Firestore rules, then reload."); });
   }
   function watchUnread() {
     for (const c of CHANNELS) {
-      db.collection("channels/" + c.id + "/messages").orderBy("ts", "desc").limit(1).onSnapshot((s) => {
+      msgCol(c.id).orderBy("ts", "desc").limit(1).onSnapshot((s) => {
         if (s.docs[0]) { latest[c.id] = s.docs[0].data().ts; if (c.id === current) store.set("sq.seen." + c.id, String(latest[c.id])); renderChannels(); }
       }, () => {});
     }
@@ -431,11 +467,9 @@ svg { display: block; }
     el.append(document.createTextNode(text.slice(last)));
   }
 
-  async function render(newIds) {
+  function render(newIds) {
     const feed = $("feed");
     const all = [...msgs, ...pending.values()].sort((a, b) => a.ts - b.ts);
-    const ids = [...new Set(all.flatMap(m => [m.by, ...Object.values(m.reactions || {}).flatMap(o => Object.keys(o || {}))]).filter(Boolean))];
-    if (user && ids.length) { try { Object.assign(profiles, await user.profiles(ids)); } catch {} }
     const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 140;
     feed.textContent = "";
 
@@ -485,7 +519,7 @@ svg { display: block; }
       }
       row.append(body);
 
-      if (!m._pending && canWrite && db && uid) {
+      if (!m._pending && uid) {
         const tools = document.createElement("div"); tools.className = "tools";
         for (const r of REACTS) { const rb = document.createElement("button"); rb.type = "button"; rb.textContent = r; rb.title = "React with " + r; rb.onclick = (ev) => { ev.stopPropagation(); toggleReact(m, r); }; tools.append(rb); }
         if (mine) {
@@ -503,46 +537,45 @@ svg { display: block; }
   }
 
   function confirmDelete(btn, m) {
-    if (btn.classList.contains("armed")) { db.doc("channels/" + current + "/messages/" + m.id).delete().catch(writeFailed); return; }
+    if (btn.classList.contains("armed")) { msgCol(current).doc(m.id).delete().catch(writeFailed); return; }
     btn.classList.add("armed"); btn.textContent = "Delete?";
     setTimeout(() => { if (btn.isConnected) { btn.classList.remove("armed"); btn.textContent = ""; btn.append(icon("i-trash", 15)); } }, 2500);
   }
   function toggleReact(m, e) {
-    if (!uid || !canWrite || !db) return;
+    if (!uid) return;
     const on = !!(m.reactions && m.reactions[e] && m.reactions[e][uid]);
-    db.doc("channels/" + current + "/messages/" + m.id).update({ reactions: { [e]: { [uid]: !on } } }).catch(writeFailed);
+    msgCol(current).doc(m.id).update(new firebase.firestore.FieldPath("reactions", e, uid), !on).catch(writeFailed);
   }
 
   // ---------- composer ----------
   const input = $("input"), sendBtn = $("send");
   const autosize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; };
-  const refreshSend = () => { sendBtn.disabled = !input.value.trim() || !canWrite || !db || !uid; };
+  const refreshSend = () => { sendBtn.disabled = !input.value.trim() || !uid || !nick; };
   let typingOff = null;
   input.addEventListener("input", () => {
     autosize(); refreshSend(); store.set("sq.draft", input.value);
-    if (room) { room.presence({ typing: input.value.trim() ? current : null }); clearTimeout(typingOff); typingOff = setTimeout(() => room.presence({ typing: null }), 4000); }
+    const want = input.value.trim() ? current : null;
+    if (want !== myTyping) { myTyping = want; beat(); }
+    clearTimeout(typingOff);
+    if (want) typingOff = setTimeout(() => { myTyping = null; beat(); }, 5000);
   });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("composer").requestSubmit(); } });
   $("composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = input.value.trim();
-    if (!text || !db || !canWrite || !uid) return;
-    const ref = db.collection("channels/" + current + "/messages").doc();
-    const body = { text, by: uid, nick: nick || "", ts: Date.now(), reactions: {} };
+    if (!text || !uid || !nick) return;
+    const ref = msgCol(current).doc();
+    const body = { text, by: uid, nick, ts: Date.now(), reactions: {} };
     pending.set(ref.id, { id: ref.id, ...body, _pending: true });
     input.value = ""; store.set("sq.draft", ""); autosize(); refreshSend(); closePicker();
-    if (room) room.presence({ typing: null });
+    if (myTyping) { myTyping = null; beat(); }
     render(new Set([ref.id]));
     try { await ref.set(body); }
     catch (err) { pending.delete(ref.id); input.value = text; autosize(); refreshSend(); render(); writeFailed(err); }
   });
   function writeFailed(err) {
-    if (err && err.code === "invalid_argument") {
-      canWrite = false; refreshSend(); input.disabled = true;
-      input.placeholder = "You can read this chat but can't post yet";
-      showBanner("You can read along, but sending is off for your account. Ask whoever shared this to add you as an Editor.");
-    } else if (err && err.code === "quota_exceeded") showBanner("The chat is full. Delete some old messages to make room.");
-    else showBanner("That message didn't send (" + (err && err.code || "network") + "). Try again in a moment.");
+    if (err && err.code === "permission-denied") showBanner("Firebase blocked that. Make sure you published the Firestore rules from firestore.rules.");
+    else showBanner("That didn't go through (" + (err && err.code || "network") + "). Try again in a moment.");
   }
 
   // emoji picker
@@ -555,29 +588,30 @@ svg { display: block; }
   }
   function closePicker() { picker.hidden = true; emojiBtn.setAttribute("aria-expanded", "false"); }
   emojiBtn.onclick = (e) => { e.stopPropagation(); const open = picker.hidden; picker.hidden = !open; emojiBtn.setAttribute("aria-expanded", String(open)); };
-  document.addEventListener("click", (e) => { if (!picker.hidden && !picker.contains(e.target) && e.target !== emojiBtn) closePicker(); });
+  document.addEventListener("click", (e) => { if (!picker.hidden && !picker.contains(e.target) && !emojiBtn.contains(e.target)) closePicker(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePicker(); app.classList.remove("drawer"); } });
 
-  // ---------- profile / nickname ----------
+  // ---------- nickname ----------
   const nickInput = $("nick"), nickForm = $("nick-form");
   function renderMe() {
-    const n = nick || (me && me.name) || "You";
+    const n = nick || "You";
     $("me-name").textContent = n;
     const av = $("me-av"); av.textContent = ""; av.append(avatarEl(uid || n, n));
   }
+  function setNick(n) { nick = n.trim().slice(0, 24); store.set("sq.nick", nick); renderMe(); refreshSend(); beat(); }
   $("edit-nick").onclick = () => { nickForm.hidden = !nickForm.hidden; if (!nickForm.hidden) { nickInput.value = nick; nickInput.focus(); nickInput.select(); } };
-  nickForm.addEventListener("submit", (e) => {
+  nickForm.addEventListener("submit", (e) => { e.preventDefault(); if (nickInput.value.trim()) setNick(nickInput.value); nickForm.hidden = true; });
+  $("welcome-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    nick = nickInput.value.trim().slice(0, 24); store.set("sq.nick", nick);
-    nickForm.hidden = true; renderMe();
-    if (room) room.presence({ nick });
+    const v = $("welcome-nick").value.trim(); if (!v) return;
+    setNick(v); $("welcome").hidden = true; input.focus();
   });
 
   // ---------- sound ----------
   const soundBtn = $("sound");
   let soundOn = store.get("sq.sound", "1") === "1";
   soundBtn.setAttribute("aria-pressed", String(soundOn));
-  soundBtn.onclick = () => { soundOn = !soundOn; store.set("sq.sound", soundOn ? "1" : "0"); soundBtn.setAttribute("aria-pressed", String(soundOn)); soundBtn.title = soundOn ? "Message sound on" : "Message sound off"; };
+  soundBtn.onclick = () => { soundOn = !soundOn; store.set("sq.sound", soundOn ? "1" : "0"); soundBtn.setAttribute("aria-pressed", String(soundOn)); };
   let actx = null;
   document.addEventListener("pointerdown", () => { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} } }, { once: true });
   function ping() {
@@ -593,37 +627,45 @@ svg { display: block; }
     } catch {}
   }
 
-  // ---------- presence ----------
-  async function renderPeers() {
-    const viewers = peers.filter(p => p.kind === "viewer");
-    const byKey = new Map();
-    for (const p of viewers) { const k = p.by || p.peer; const cur = byKey.get(k); if (!cur || p.updatedAt > cur.updatedAt) byKey.set(k, p); }
-    const list = [...byKey.values()].sort((a, b) => b.isMe - a.isMe);
-    const ids = list.map(p => p.by).filter(Boolean);
-    if (user && ids.length) { try { Object.assign(profiles, await user.profiles(ids)); } catch {} }
-
+  // ---------- presence (who's online + typing) ----------
+  function beat() {
+    if (!fs || !uid || !nick) return;
+    fs.collection("presence").doc(uid).set({ nick, chan: current, typing: myTyping, lastSeen: Date.now() }).catch(() => {});
+  }
+  function watchPresence() {
+    fs.collection("presence").where("lastSeen", ">", Date.now() - 6 * 3600e3).onSnapshot((s) => {
+      presence = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderPeers();
+    }, () => {});
+    setInterval(beat, BEAT_MS);
+    setInterval(renderPeers, 15000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) beat(); });
+    window.addEventListener("pagehide", () => { if (uid) fs.collection("presence").doc(uid).set({ nick, chan: current, typing: null, lastSeen: 0 }).catch(() => {}); });
+  }
+  function renderPeers() {
+    const now = Date.now();
+    const list = presence.filter(p => p.lastSeen > now - ONLINE_MS).sort((a, b) => (b.id === uid) - (a.id === uid));
     const ul = $("people"); ul.textContent = "";
     for (const p of list) {
-      const n = nameOf(p.by, p.presence && p.presence.nick);
+      const n = p.nick || "Someone";
       const li = document.createElement("li"); li.className = "person";
-      const w = document.createElement("span"); w.className = "pav"; w.append(avatarEl(p.by || p.peer, n, true));
+      const w = document.createElement("span"); w.className = "pav"; w.append(avatarEl(p.id, n, true));
       const nm = document.createElement("span"); nm.className = "nm"; nm.textContent = n;
       li.append(w, nm);
-      if (p.isMe) { const y = document.createElement("span"); y.className = "tag"; y.textContent = "you"; li.append(y); }
-      const ch = p.presence && p.presence.chan;
-      if (ch && CHANNELS.find(c => c.id === ch)) { const wh = document.createElement("span"); wh.className = "where"; wh.textContent = "#" + ch; li.append(wh); }
+      if (p.id === uid) { const y = document.createElement("span"); y.className = "tag"; y.textContent = "you"; li.append(y); }
+      if (p.chan && CHANNELS.find(c => c.id === p.chan)) { const wh = document.createElement("span"); wh.className = "where"; wh.textContent = "#" + p.chan; li.append(wh); }
       ul.append(li);
     }
     if (!list.length) ul.innerHTML = '<li class="person note">Just you for now</li>';
     $("online-n").textContent = list.length || "";
     $("ws-online").textContent = list.length + " online";
 
-    const here = list.filter(p => p.presence && p.presence.chan === current);
+    const here = list.filter(p => p.chan === current);
     const faces = $("faces"); faces.textContent = "";
-    here.slice(0, 4).forEach(p => { const n = nameOf(p.by, p.presence.nick); const a = avatarEl(p.by || p.peer, n, true); a.title = n; faces.append(a); });
+    here.slice(0, 4).forEach(p => { const a = avatarEl(p.id, p.nick || "?", true); a.title = p.nick || ""; faces.append(a); });
     $("online-count").textContent = here.length ? here.length + " in channel" : "";
 
-    const typers = [...new Set(viewers.filter(p => !p.isMe && p.presence && p.presence.typing === current).map(p => nameOf(p.by, p.presence.nick)))];
+    const typers = [...new Set(list.filter(p => p.id !== uid && p.typing === current).map(p => p.nick || "Someone"))];
     const t = $("typing"); t.textContent = "";
     if (typers.length) {
       const dots = document.createElement("span"); dots.className = "dots"; dots.innerHTML = "<i></i><i></i><i></i>";
@@ -632,29 +674,30 @@ svg { display: block; }
     }
   }
 
-  // ---------- chat name (owner can rename) ----------
+  // ---------- chat name (first person to rename becomes the owner) ----------
   const DEFAULT_NAME = "Squad Chat";
-  let chatName = store.get("sq.name", DEFAULT_NAME), nameVersion = null;
   const wsForm = $("ws-form"), wsInput = $("ws-input");
   function applyName(n) {
-    chatName = (n || "").trim() || DEFAULT_NAME;
-    $("ws-name").textContent = chatName; document.title = chatName; store.set("sq.name", chatName);
+    const name = (n || "").trim() || DEFAULT_NAME;
+    $("ws-name").textContent = name; document.title = name; $("welcome-title").textContent = "Welcome to " + name; store.set("sq.name", name);
   }
-  applyName(chatName);
+  applyName(store.get("sq.name", DEFAULT_NAME));
   function watchName() {
-    db.doc("meta/settings").onSnapshot((s) => { applyName(s.exists ? s.data().name : DEFAULT_NAME); }, () => {});
+    fs.collection("meta").doc("settings").onSnapshot((s) => {
+      settings = s.exists ? s.data() : null;
+      applyName(settings && settings.name);
+      $("ws-edit").hidden = !!(settings && settings.owner && settings.owner !== uid);
+    }, () => {});
   }
-  $("ws-edit").onclick = () => { wsForm.hidden = false; wsInput.value = chatName; wsInput.focus(); wsInput.select(); };
+  $("ws-edit").onclick = () => { wsForm.hidden = false; wsInput.value = $("ws-name").textContent; wsInput.focus(); wsInput.select(); };
   $("ws-cancel").onclick = () => { wsForm.hidden = true; };
   wsInput.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); wsForm.hidden = true; } });
   wsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const n = wsInput.value.trim().slice(0, 32) || DEFAULT_NAME;
     wsForm.hidden = true;
-    if (n === chatName) return;
-    const old = chatName; applyName(n);
-    try { await db.doc("meta/settings").set({ name: n }); }
-    catch (err) { applyName(old); showBanner("Couldn't rename the chat (" + (err && err.code || "network") + "). Only the chat's owner can change its name."); }
+    try { await fs.collection("meta").doc("settings").set({ name: n, owner: (settings && settings.owner) || uid }); }
+    catch (err) { showBanner("Couldn't rename the chat. Only the chat's owner can change its name."); }
   });
 
   function showBanner(text) { const b = $("banner"); b.textContent = text; b.hidden = false; }
@@ -664,39 +707,24 @@ svg { display: block; }
   renderChannels(); setHeader(); renderMe();
   input.value = store.get("sq.draft", ""); autosize();
 
-  if (!window.claude || !window.claude.use) {
-    $("feed").innerHTML = '<div class="intro"><h3>Chat is offline here</h3><p>Sending and loading messages only works in the claude.ai version for now. Open the claude.ai link to chat with the squad.</p></div>';
-    input.disabled = true; input.placeholder = "Chat only works on the claude.ai version for now";
-    $("people").innerHTML = '<li class="person note">Offline</li>'; $("ws-online").textContent = "Offline";
-    return;
+  if (!firebaseConfig.apiKey || !window.firebase) {
+    $("feed").innerHTML = '<div class="intro"><h3>Almost there</h3><p>Paste your Firebase config at the top of the script in index.html, then reload.</p></div>';
+    input.disabled = true; return;
   }
-  (async () => {
-    [db, user, room] = await Promise.all([claude.use("db"), claude.use("user"), claude.use("room")]);
-    if (user) {
-      try { me = await user.me(); uid = me.id; } catch {}
-      if (!nick && me && me.name) { nick = me.name.split(" ")[0]; store.set("sq.nick", nick); }
-      renderMe();
-      try { if ((await user.can("data.write")) === false) writeFailed({ code: "invalid_argument" }); } catch {}
-    }
-    if (!db) {
-      $("feed").innerHTML = '<div class="intro"><h3>Sign in to chat</h3><p>Sign in to claude.ai and reopen this link to read and send messages.</p></div>';
-      input.disabled = true; return;
-    }
-    if (!uid) { canWrite = false; input.disabled = true; input.placeholder = "Sign in to send messages"; }
-    subscribeFeed(); watchUnread(); watchName();
-    if (user && user.isOwner()) $("ws-edit").hidden = false;
-    if (room) {
-      room.presence({ chan: current, nick, typing: null });
-      room.onPeers((ch) => { peers = ch.peers; renderPeers(); });
-      if (room.onConnection) room.onConnection((ok) => { $("status").innerHTML = ok ? "<b>Enter</b> to send · <b>Shift + Enter</b> for a new line" : "Reconnecting…"; });
-    } else {
-      $("people").innerHTML = '<li class="person note">Online list isn\'t available here</li>';
-      $("ws-online").textContent = "Live";
-    }
+  firebase.initializeApp(firebaseConfig);
+  fs = firebase.firestore();
+  firebase.auth().onAuthStateChanged((u) => {
+    if (!u) return;
+    const first = !uid; uid = u.uid; renderMe();
+    if (!first) return;
+    if (!nick) { $("welcome").hidden = false; setTimeout(() => $("welcome-nick").focus(), 50); }
+    subscribeFeed(); watchUnread(); watchName(); watchPresence(); beat();
     refreshSend();
-  })();
+  });
+  firebase.auth().signInAnonymously().catch((e) => {
+    showBanner("Couldn't sign in (" + e.code + "). In Firebase, turn on Authentication → Sign-in method → Anonymous.");
+  });
 })();
 </script>
-
 </body>
 </html>
